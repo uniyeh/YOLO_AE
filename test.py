@@ -8,8 +8,11 @@ print("create model done.")
 train_results = model.train(
     data="coco8.yaml",  # Path to dataset configuration file
     epochs=100,  # Number of training epochs
-    imgsz=640,  # Image size for training
+    imgsz=608,  # Image size for training
     device="device=0",  # Device to run on (e.g., 'cpu', 0, [0,1,2,3])
+    batch=48,
+    project='ae_experiments',
+    name='gpu_training_v1'
 )
 
 print("train model done.")
