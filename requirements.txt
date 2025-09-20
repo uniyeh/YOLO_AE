@@ -29,5 +29,10 @@ thop  # for FLOPs calculation
 tensorboard  # for logging
 wandb  # for experiment tracking (optional)
 
+# CLIP dependencies
+ftfy
+regex
+git+https://github.com/openai/CLIP.git
+
 # Development
 pytest  # for testing
