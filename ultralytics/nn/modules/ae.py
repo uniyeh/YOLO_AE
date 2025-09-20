@@ -15,70 +15,53 @@ import torch.nn.functional as F
 class AssistedExcitation(nn.Module):
     """
     Assisted Excitation module that enhances feature activations using ground truth bounding boxes.
+    Based on "Assisted Excitation of Activations: A Learning Technique to Improve Object Detectors"
 
     During training, this module:
     1. Creates binary masks from ground truth bounding boxes
-    2. Applies Gaussian smoothing to create soft attention maps
-    3. Uses cosine annealing to gradually reduce excitation strength
-    4. Enhances features in object regions to improve learning
+    2. Uses cosine annealing to gradually reduce excitation strength
+    3. Enhances features in object regions to improve learning
 
     Args:
-        channels (int): Number of input channels
-        sigma (float): Standard deviation for Gaussian smoothing. Default: 0.5
+        in_channels (int): Number of input channels
         alpha_max (float): Maximum excitation strength. Default: 1.0
         alpha_min (float): Minimum excitation strength. Default: 0.0
-        max_iters (int): Maximum training iterations for annealing. Default: 50000
+        max_iter (int): Maximum training iterations for annealing. Default: 50000
     """
 
-    def __init__(self, channels, sigma=0.5, alpha_max=1.0, alpha_min=0.0, max_iters=50000):
+    def __init__(self, in_channels, alpha_max=0.5, alpha_min=0.0, max_iters=50000):
         super(AssistedExcitation, self).__init__()
-        self.channels = channels
-        self.sigma = sigma
+        self.in_channels = in_channels
         self.alpha_max = alpha_max
         self.alpha_min = alpha_min
-        self.max_iters = max_iters
+        self.max_iter = max_iters
         self.current_iter = 0
 
-        # Pre-compute Gaussian kernel for efficiency
-        self.register_buffer('gaussian_kernel', self._create_gaussian_kernel())
 
-    def _create_gaussian_kernel(self, kernel_size=5):
-        """Create 2D Gaussian kernel for smoothing attention maps."""
-        ax = torch.arange(-kernel_size // 2 + 1., kernel_size // 2 + 1.)
-        xx, yy = torch.meshgrid(ax, ax, indexing='ij')
-        kernel = torch.exp(-(xx**2 + yy**2) / (2 * self.sigma**2))
-        kernel = kernel / kernel.sum()
-        return kernel.unsqueeze(0).unsqueeze(0)  # Shape: (1, 1, K, K)
-
-    def _cosine_annealing_alpha(self):
+    def _calc_excitation_factor(self):
         """
         Compute current alpha using cosine annealing schedule.
         Alpha decreases from alpha_max to alpha_min over max_iters iterations.
         """
-        if self.current_iter >= self.max_iters:
+        if self.current_iter >= self.max_iter:
             return self.alpha_min
-
-        # Cosine annealing: starts at alpha_max, ends at alpha_min
-        progress = self.current_iter / self.max_iters
-        alpha = self.alpha_min + (self.alpha_max - self.alpha_min) * \
-                (1 + math.cos(math.pi * progress)) / 2
+        alpha = self.alpha_max * (1 + math.cos(math.pi * self.current_iter)) /  self.max_iter
         return alpha
 
-    def _create_attention_map(self, targets, height, width, device):
+    def _create_bbox_map(self, targets, height, width, batch_size, device):
         """
-        Create attention maps from ground truth bounding boxes.
+        Create binary masks from ground truth bounding boxes as described in the paper.
 
         Args:
             targets (list): List of target dictionaries containing bounding boxes
             height (int): Feature map height
             width (int): Feature map width
+            batch_size(int): Batch size of each input
             device (torch.device): Device to create tensors on
-
         Returns:
-            torch.Tensor: Attention maps of shape (batch_size, 1, height, width)
+            torch.Tensor: Binary masks of shape (batch_size, 1, height, width)
         """
-        batch_size = len(targets)
-        attention_maps = torch.zeros(batch_size, 1, height, width, device=device)
+        bbox_map = torch.zeros(batch_size, 1, height, width, device=device)
 
         for batch_idx, target in enumerate(targets):
             if target is None:
@@ -106,7 +89,7 @@ class AssistedExcitation(nn.Module):
                 boxes = boxes.unsqueeze(0)
 
             # Create binary mask for this batch
-            mask = torch.zeros(height, width, device=device)
+            gt = torch.zeros(height, width, device=device)
 
             for box in boxes:
                 if len(box) >= 4:
@@ -127,21 +110,11 @@ class AssistedExcitation(nn.Module):
 
                     # Fill bounding box region
                     if x2 > x1 and y2 > y1:
-                        mask[y1:y2+1, x1:x2+1] = 1.0
+                        gt[y1:y2+1, x1:x2+1] = 1.0
 
-            attention_maps[batch_idx, 0] = mask
+            bbox_map[batch_idx, 0] = gt
 
-        return attention_maps
-
-    def _smooth_attention_maps(self, attention_maps):
-        """Apply Gaussian smoothing to attention maps."""
-        # Pad attention maps for convolution
-        padding = self.gaussian_kernel.shape[-1] // 2
-        attention_maps = F.pad(attention_maps, (padding, padding, padding, padding), mode='reflect')
-
-        # Apply Gaussian smoothing
-        smoothed = F.conv2d(attention_maps, self.gaussian_kernel, padding=0)
-        return smoothed
+        return bbox_map
 
     def forward(self, x, targets=None):
         """
@@ -161,42 +134,32 @@ class AssistedExcitation(nn.Module):
         batch_size, channels, height, width = x.shape
         device = x.device
 
-        # Get current excitation strength
-        alpha = self._cosine_annealing_alpha()
+        # Get current excitation strength using cosine annealing schedule
+        alpha = self._calc_excitation_factor()
 
         # If alpha is very small, skip excitation for efficiency
         if alpha < 1e-6:
             return x
 
-        # Create attention maps from ground truth
-        attention_maps = self._create_attention_map(targets, height, width, device)
+        # Create binary masks from ground truth bounding boxes
+        bbox_map = self._create_bbox_map(targets, height, width, batch_size, device)
 
-        # Apply Gaussian smoothing to create soft attention
-        if self.sigma > 0:
-            attention_maps = self._smooth_attention_maps(attention_maps)
+        # Compute channel-wise average to summarize all feature information
+        c_avg = torch.mean(x, dim=1, keepdim=True)
 
-        # Expand attention maps to match input channels
-        attention_maps = attention_maps.expand(-1, channels, -1, -1)
+        # Apply bbox mask to averaged features with alpha scaling
+        excitation = alpha * bbox_map * c_avg
 
-        # Apply assisted excitation: enhanced_features = x + alpha * attention * x
-        enhanced_features = x + alpha * attention_maps * x
+        # Expand excitation to match all feature channels for addition
+        excitation = excitation.expand(-1, channels, -1, -1)
 
-        # Update iteration counter
+        # Add channel-averaged spatial enhancement to original features
+        x += excitation
+
+        # Update iteration counter for cosine annealing schedule
         self.current_iter += 1
 
-        return enhanced_features
-
-    def reset_iteration(self):
-        """Reset iteration counter (useful for new training epochs)."""
-        self.current_iter = 0
-
-    def set_iteration(self, iteration):
-        """Set current iteration explicitly."""
-        self.current_iter = iteration
-
-    def get_current_alpha(self):
-        """Get current excitation strength."""
-        return self._cosine_annealing_alpha()
+        return x
 
 
 # Example usage and testing
@@ -214,7 +177,7 @@ if __name__ == "__main__":
     ]
 
     # Test AssistedExcitation
-    ae_module = AssistedExcitation(channels=channels, sigma=0.5, alpha_max=1.0)
+    ae_module = AssistedExcitation(in_channels=channels, alpha_max=1.0)
     ae_module.train()
 
     print(f"Input shape: {x.shape}")

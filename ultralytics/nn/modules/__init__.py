@@ -102,6 +102,8 @@ from .transformer import (
     TransformerLayer,
 )
 
+from .ae import AssistedExcitation
+
 __all__ = (
     "Conv",
     "Conv2",
@@ -179,4 +181,5 @@ __all__ = (
     "TorchVision",
     "Index",
     "A2C2f",
+    "AssistedExcitation"
 )
