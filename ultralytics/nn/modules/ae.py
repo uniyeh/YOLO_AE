@@ -117,6 +117,8 @@ class AssistedExcitation(nn.Module):
         return bbox_map
 
     def forward(self, x, targets=None):
+        print(f"AE forward: training={self.training}, targets={'None' if targets is None else 
+  len(targets)}")
         """
         Forward pass with assisted excitation.
 
@@ -129,6 +131,7 @@ class AssistedExcitation(nn.Module):
         """
         # During inference or when no targets provided, return input unchanged
         if not self.training or targets is None:
+            print("AE: Skipping excitation (inference or no targets)")
             return x
 
         batch_size, channels, height, width = x.shape
@@ -136,6 +139,7 @@ class AssistedExcitation(nn.Module):
 
         # Get current excitation strength using cosine annealing schedule
         alpha = self._calc_excitation_factor()
+        print(f"AE: Current alpha={alpha:.6f}, iteration={self.current_iter}")
 
         # If alpha is very small, skip excitation for efficiency
         if alpha < 1e-6:
@@ -158,44 +162,6 @@ class AssistedExcitation(nn.Module):
 
         # Update iteration counter for cosine annealing schedule
         self.current_iter += 1
-
+        print("AE layer done.")
         return x
 
-
-# Example usage and testing
-if __name__ == "__main__":
-    # Test basic AssistedExcitation module
-    print("Testing AssistedExcitation module...")
-
-    batch_size, channels, height, width = 2, 256, 32, 32
-    x = torch.randn(batch_size, channels, height, width)
-
-    # Create sample targets (YOLO format: normalized coordinates)
-    targets = [
-        {'boxes': torch.tensor([[0.5, 0.5, 0.3, 0.4], [0.2, 0.8, 0.15, 0.2]])},  # 2 boxes
-        {'boxes': torch.tensor([[0.7, 0.3, 0.25, 0.35]])}  # 1 box
-    ]
-
-    # Test AssistedExcitation
-    ae_module = AssistedExcitation(in_channels=channels, alpha_max=1.0)
-    ae_module.train()
-
-    print(f"Input shape: {x.shape}")
-    output = ae_module(x, targets)
-    print(f"Output shape: {output.shape}")
-    print(f"Current alpha: {ae_module.get_current_alpha():.6f}")
-
-    # Test iteration management
-    print(f"\nIteration management:")
-    print(f"Initial iteration: {ae_module.current_iter}")
-
-    ae_module.set_iteration(1000)
-    print(f"Alpha after setting to 1000: {ae_module.get_current_alpha():.6f}")
-
-    ae_module.set_iteration(25000)  # Half of max_iters
-    print(f"Alpha at half training: {ae_module.get_current_alpha():.6f}")
-
-    ae_module.set_iteration(50000)  # Max iterations
-    print(f"Alpha at max iterations: {ae_module.get_current_alpha():.6f}")
-
-    print("\nAssistedExcitation implementation complete!")
