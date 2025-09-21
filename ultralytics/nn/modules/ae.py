@@ -117,8 +117,7 @@ class AssistedExcitation(nn.Module):
         return bbox_map
 
     def forward(self, x, targets=None):
-        print(f"AE forward: training={self.training}, targets={'None' if targets is None else 
-  len(targets)}")
+        print(f"AE forward: training={self.training}, targets={'None' if targets is None else len(targets)}")
         """
         Forward pass with assisted excitation.
 
