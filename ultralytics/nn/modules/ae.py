@@ -24,17 +24,17 @@ class AssistedExcitation(nn.Module):
 
     Args:
         in_channels (int): Number of input channels
-        alpha_max (float): Maximum excitation strength. Default: 1.0
+        alpha_max (float): Maximum excitation strength. Default: 0.5
         alpha_min (float): Minimum excitation strength. Default: 0.0
-        max_iter (int): Maximum training iterations for annealing. Default: 50000
+        max_iters (int): Maximum training iterations for annealing. Default: 100
     """
 
-    def __init__(self, in_channels, alpha_max=0.5, alpha_min=0.0, max_iters=50000):
+    def __init__(self, in_channels, alpha_max=0.5, alpha_min=0.0, max_iters=100):
         super(AssistedExcitation, self).__init__()
         self.in_channels = in_channels
         self.alpha_max = alpha_max
         self.alpha_min = alpha_min
-        self.max_iter = max_iters
+        self.max_iters = max_iters
         self.current_iter = 0
 
 
@@ -42,94 +42,87 @@ class AssistedExcitation(nn.Module):
         """
         Compute current alpha using cosine annealing schedule.
         Alpha decreases from alpha_max to alpha_min over max_iters iterations.
+
+        Uses modified cosine annealing: alpha = alpha_max * (1 + cos(π * progress))
+        where progress = current_iter / max_iters.
         """
-        if self.current_iter >= self.max_iter:
+        if self.max_iters <= 0 or self.current_iter >= self.max_iters:
             return self.alpha_min
-        alpha = self.alpha_max * (1 + math.cos(math.pi * self.current_iter)) /  self.max_iter
+        alpha = self.alpha_max * (1 + math.cos(math.pi * self.current_iter / self.max_iters)) 
         return alpha
 
-    def _create_bbox_map(self, targets, height, width, batch_size, device):
+    def _create_bbox_map(self, batch_data, height, width, batch_size, device):
         """
-        Create binary masks from ground truth bounding boxes as described in the paper.
+        Create binary masks from ground truth bounding boxes for each image in the batch.
+
+        Processes YOLO's flattened bounding box format where all boxes from all images
+        are stored in a single tensor with batch indices. For each image in the batch,
+        creates a binary mask where pixels inside any ground truth bounding box are set
+        to 1.0, and pixels outside all bounding boxes are set to 0.0. Multiple bounding
+        boxes in the same image are accumulated using clamping to maintain binary values.
 
         Args:
-            targets (list): List of target dictionaries containing bounding boxes
-            height (int): Feature map height
-            width (int): Feature map width
-            batch_size(int): Batch size of each input
-            device (torch.device): Device to create tensors on
+            batch_data (dict): Batch data containing 'bboxes' and 'batch_idx' tensors.
+                              bboxes: tensor of shape [total_boxes, 4] in YOLO format
+                              [x_center, y_center, width, height] with normalized coordinates (0-1).
+                              batch_idx: tensor of shape [total_boxes] indicating which image each box belongs to.
+            height (int): Feature map height for the binary mask
+            width (int): Feature map width for the binary mask
+            batch_size (int): Number of images in the batch
+            device (torch.device): Device to create tensors on (CPU/GPU)
+
         Returns:
-            torch.Tensor: Binary masks of shape (batch_size, 1, height, width)
+            torch.Tensor: Binary masks of shape (batch_size, 1, height, width) where
+                         each mask[i, 0] contains the accumulated binary mask for image i.
         """
         bbox_map = torch.zeros(batch_size, 1, height, width, device=device)
-
-        for batch_idx, target in enumerate(targets):
-            if target is None:
+        batch_idx = batch_data['batch_idx']
+        bboxes = batch_data['bboxes']
+        bboxes_amt = len(bboxes)
+        current_img = batch_idx[0].int()
+        gt = torch.zeros(height, width, device=device)
+        for i in range(bboxes_amt):
+            if i >= len(batch_idx):
+                break  # Safety check for out of bounds
+            if batch_idx[i].int() != current_img:
+                # Switched to new image, reset ground truth mask
+                gt = torch.zeros(height, width, device=device)
+                current_img = batch_idx[i].int()
+            
+            bbox = bboxes[i]
+            if bbox is None:
                 continue
+            # Extract YOLO format coordinates: [x_center, y_center, width, height] (normalized)
+            x_center, y_center, box_width, box_height = bbox
 
-            # Extract bounding boxes (handle different target formats)
-            if isinstance(target, dict):
-                boxes = target.get('boxes', None)
-                if boxes is None:
-                    boxes = target.get('bboxes', None)
-            elif hasattr(target, 'boxes'):
-                boxes = target.boxes
-            else:
-                boxes = target
+            # Convert to pixel coordinates
+            x1 = max(0, int((x_center - box_width/2) * width))
+            y1 = max(0, int((y_center - box_height/2) * height))
+            x2 = min(width-1, int((x_center + box_width/2) * width))
+            y2 = min(height-1, int((y_center + box_height/2) * height))
 
-            if boxes is None or len(boxes) == 0:
-                continue
+            # Fill bounding box region in ground truth mask
+            if x2 > x1 and y2 > y1:
+                gt[y1:y2+1, x1:x2+1] = 1
 
-            # Convert to tensor if needed
-            if not isinstance(boxes, torch.Tensor):
-                boxes = torch.tensor(boxes, device=device, dtype=torch.float32)
-
-            # Ensure boxes are 2D
-            if boxes.dim() == 1:
-                boxes = boxes.unsqueeze(0)
-
-            # Create binary mask for this batch
-            gt = torch.zeros(height, width, device=device)
-
-            for box in boxes:
-                if len(box) >= 4:
-                    # Handle both YOLO format (x_center, y_center, width, height)
-                    # and COCO format (x_min, y_min, x_max, y_max)
-                    if box.max() <= 1.0:  # YOLO format (normalized)
-                        x_center, y_center, box_width, box_height = box[:4]
-                        x1 = max(0, int((x_center - box_width/2) * width))
-                        y1 = max(0, int((y_center - box_height/2) * height))
-                        x2 = min(width-1, int((x_center + box_width/2) * width))
-                        y2 = min(height-1, int((y_center + box_height/2) * height))
-                    else:  # COCO format (absolute coordinates)
-                        x1, y1, x2, y2 = box[:4].int()
-                        x1 = max(0, min(x1, width-1))
-                        y1 = max(0, min(y1, height-1))
-                        x2 = max(0, min(x2, width-1))
-                        y2 = max(0, min(y2, height-1))
-
-                    # Fill bounding box region
-                    if x2 > x1 and y2 > y1:
-                        gt[y1:y2+1, x1:x2+1] = 1.0
-
-            bbox_map[batch_idx, 0] = gt
-
+            # Accumulate ground truth into bbox_map with clamping to maintain binary values
+            bbox_map[current_img, 0] = torch.clamp(bbox_map[current_img, 0] + gt, 0, 1)
         return bbox_map
 
-    def forward(self, x, targets=None):
-        print(f"AE forward: training={self.training}, targets={'None' if targets is None else len(targets)}")
+    def forward(self, x, ground_truth=None):
+        print(f"AE forward: training={self.training}, targets={'None' if ground_truth is None else len(ground_truth)}")
         """
         Forward pass with assisted excitation.
 
         Args:
             x (torch.Tensor): Input feature maps of shape (B, C, H, W)
-            targets (list, optional): Ground truth targets for training
+            ground_truth (dict, optional): Ground truth batch data containing 'bboxes' and 'batch_idx'
 
         Returns:
             torch.Tensor: Enhanced feature maps of same shape as input
         """
-        # During inference or when no targets provided, return input unchanged
-        if not self.training or targets is None:
+        # Skip excitation during inference or when no ground truth is provided
+        if not self.training or ground_truth is None:
             print("AE: Skipping excitation (inference or no targets)")
             return x
 
@@ -138,29 +131,30 @@ class AssistedExcitation(nn.Module):
 
         # Get current excitation strength using cosine annealing schedule
         alpha = self._calc_excitation_factor()
-        print(f"AE: Current alpha={alpha:.6f}, iteration={self.current_iter}")
+        print(f"AE Layer Start: Current alpha={alpha:.6f}, iteration={self.current_iter}")
 
-        # If alpha is very small, skip excitation for efficiency
+        # Skip excitation if alpha is negligible for computational efficiency
         if alpha < 1e-6:
             return x
 
         # Create binary masks from ground truth bounding boxes
-        bbox_map = self._create_bbox_map(targets, height, width, batch_size, device)
+        bbox_map = self._create_bbox_map(ground_truth, height, width, batch_size, device)
+        print(f"AE bbox_map generated: {len(bbox_map)}")
 
         # Compute channel-wise average to summarize all feature information
         c_avg = torch.mean(x, dim=1, keepdim=True)
 
-        # Apply bbox mask to averaged features with alpha scaling
+        # Apply spatial mask to channel-averaged features with alpha scaling
         excitation = alpha * bbox_map * c_avg
 
-        # Expand excitation to match all feature channels for addition
+        # Expand excitation to match all input feature channels
         excitation = excitation.expand(-1, channels, -1, -1)
 
-        # Add channel-averaged spatial enhancement to original features
+        # Add spatial enhancement to original features (element-wise addition)
         x += excitation
 
         # Update iteration counter for cosine annealing schedule
         self.current_iter += 1
-        print("AE layer done.")
+        print("AE layer completed.")
         return x
 

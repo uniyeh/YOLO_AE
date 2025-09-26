@@ -50,7 +50,6 @@ class YOLO(Model):
         Initialize from a YAML configuration
         >>> model = YOLO("yolo11n.yaml")
     """
-
     def __init__(self, model: str | Path = "yolo11n.pt", task: str | None = None, verbose: bool = False):
         """
         Initialize a YOLO model.

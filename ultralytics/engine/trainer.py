@@ -413,7 +413,7 @@ class BaseTrainer:
                 with autocast(self.amp):
                     batch = self.preprocess_batch(batch)
                     # decouple inference and loss calculations for torch.compile convenience
-                    preds = self.model(batch["img"])
+                    preds = self.model(batch["img"], ground_truth=batch)
                     loss, self.loss_items = unwrap_model(self.model).loss(batch, preds)
                     self.loss = loss.sum()
                     if RANK != -1:

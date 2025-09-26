@@ -1,26 +1,13 @@
 from ultralytics import YOLO
 
-# Load a pretrained YOLO11n model
-model = YOLO("yoloe-11-ae.yaml")
-print("create model done.")
+# Load a model
+model = YOLO('yolo11-ae-single.yaml')  # build a new model from scratch
 
-# Train the model on the COCO8 dataset for 100 epochs
-train_results = model.train(
-    data="coco8.yaml",  # Path to dataset configuration file
-    epochs=100,  # Number of training epochs
-    imgsz=608,  # Image size for training
-    batch=48,
-    project='ae_experiments',
-    name='gpu_training_v1'
-)
-
-print("train model done.")
-# Evaluate the model's performance on the validation set
-metrics = model.val()
-
-# Perform object detection on an image
-results = model("https://ultralytics.com/images/bus.jpg")  # Predict on an image
-results[0].show()  # Display results
-
-# Export the model to ONNX format for deployment
-path = model.export(format="onnx")  # Returns the path to the exported model
+# Use the model
+results = model.train(
+    data='coco.yaml',
+    epochs=100
+)  # train the model
+results = model.val()  # evaluate model performance on the validation set
+results = model('https://ultralytics.com/images/bus.jpg')  # predict on an image
+results = model.export(format='onnx')  # export the model to ONNX format    

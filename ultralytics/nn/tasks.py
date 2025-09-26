@@ -139,12 +139,13 @@ class BaseModel(torch.nn.Module):
             return self.loss(x, *args, **kwargs)
         return self.predict(x, *args, **kwargs)
 
-    def predict(self, x, profile=False, visualize=False, augment=False, embed=None):
+    def predict(self, x, ground_truth=None, profile=False, visualize=False, augment=False, embed=None):
         """
         Perform a forward pass through the network.
 
         Args:
             x (torch.Tensor): The input tensor to the model.
+            ground_truth: bbox labeling data.
             profile (bool): Print the computation time of each layer if True.
             visualize (bool): Save the feature maps of the model if True.
             augment (bool): Augment image during prediction.
@@ -154,10 +155,10 @@ class BaseModel(torch.nn.Module):
             (torch.Tensor): The last output of the model.
         """
         if augment:
-            return self._predict_augment(x)
-        return self._predict_once(x, profile, visualize, embed)
+            return self._predict_augment(x, ground_truth)
+        return self._predict_once(x, ground_truth, profile, visualize, embed)
 
-    def _predict_once(self, x, profile=False, visualize=False, embed=None):
+    def _predict_once(self, x, ground_truth=None, profile=False, visualize=False, embed=None):
         """
         Perform a forward pass through the network.
 
@@ -178,7 +179,11 @@ class BaseModel(torch.nn.Module):
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
             if profile:
                 self._profile_one_layer(m, x, dt)
-            x = m(x)  # run
+            
+            if isinstance(m, AssistedExcitation):
+                x = m(x, ground_truth)
+            else:
+                x = m(x)  # run
             y.append(x if m.i in self.save else None)  # save output
             if visualize:
                 feature_visualization(x, m.type, m.i, save_dir=visualize)
